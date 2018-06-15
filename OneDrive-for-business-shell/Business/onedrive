@@ -1,0 +1,158 @@
+#!/bin/bash
+
+if [ -L "$0" ]; then
+    work_path=$(readlink "$0") 
+    work_name=$(basename "$work_path")
+    work_path=$(dirname "$work_path") 
+else
+    work_name=$(basename "$0") 
+    work_path=$(dirname "$0") 
+fi
+
+export script_base_name=$work_name
+export script_base_folder=$work_path
+
+source "${script_base_folder}/onedrive.cfg"
+source "${script_base_folder}/onedrive-base"
+
+export json_parser="${script_base_folder}/json-parser"
+export time_start=$(date +"%s")
+export simple_debug=1
+export creat_folder=0
+export rename_mode=0
+export silent_mode=0
+export debug_mode=0
+export auth_mode=0
+export link_mode=0
+
+while [[ $# -ge 1 ]]; do
+    case $1 in
+        -h|--help)
+            echo "Usage: ${script_base_name} [OPTIONS] file1 [file2...]"
+            echo "       ${script_base_name}-d floder"
+            echo ""
+            echo "Options:"
+            echo "  -d, --debug        Enable debug mode"
+            echo "  -a, --authorize    Run authorization process"
+            echo "  -f, --folder       Upload files into this remote folder"
+            echo "  -c, --creat        Creat remote folder."
+            echo "                     Directory names are separated with a slash,
+            echo "                     e.g."rootFolder/subFolder"
+            echo "                     Do NOT use a trailing slash!"
+            echo "  -h, --help         Show this help"
+            echo "  -r, --rename       Rename the files during upload"
+            echo "                     For each file you specify you MUST also specify"
+            echo "                     the remote filename as the subsequent parameter"
+            echo "                     Be especially careful with globbing!"
+            echo "  -s, --silent       Silent mode for use in crontab scripts." 
+            echo "                     Return only exit code."
+            echo "  -ls,--list         Show the itmes in this directory."
+            echo "  -l, --link         Show the file share link."
+            exit 0
+            ;;
+        -f|--folder)
+            shift
+            folder_name="$1"
+            shift
+            ;;
+        -c|--creat)
+            shift
+            folder_name="$1"
+            creat_folder=1
+            shift
+            ;;
+        -r|--rename)
+            shift
+            rename_mode=1
+            ;;
+        -ls|--list|-l|--link)
+            shift
+            link_mode=1
+            ;;
+        -d|--debug)
+            shift
+	    simple_debug=0
+            debug_mode=1
+            ;;
+        -s|--silent)
+            shift
+            silent_mode=1
+            ;;
+        -a|--authorize)
+            shift
+            auth_mode=1
+            ;;
+        *)
+            break;
+            ;;
+    esac
+done
+
+if [ "${auth_mode}" == "1" ]; then
+        bash "${script_base_folder}/onedrive-authorize"
+        exit 0
+fi
+
+if [ ! -f  "${script_base_folder}/.refresh_token" ]; then
+        echo -e "\n\033[04mIt does not seem to be authorized.\033[0m\n"
+        bash "${script_base_folder}/onedrive-authorize"
+        exit 0
+fi
+
+curl_discover_uri
+exit_on_error
+
+export api_uri
+export api_resource_id 
+
+if [ "${link_mode}" == "1" ]; then
+    if [[ ${BASH_VERSION:0:1} -ge 4 && ${BASH_VERSION:2:1} -ge 2 ]]; then
+        PRINTF="printf"
+    else
+        # may not work on all systems; needs testing
+        PRINTF=`which printf 2> /dev/null`
+        if [[ $? -ne 0 ]]; then
+	    PRINTF="printf"
+        fi
+    fi
+    export PRINTF
+
+    function list_folder() {
+        source "${script_base_folder}/onedrive-base"
+        onedrive_list_items "$1"
+    }
+    export -f list_folder
+
+    printf "%s\0" "${@}" | xargs -0 -n2 bash -c 'list_folder "$1"' bash
+    exit 0
+fi
+
+if [ -n "${folder_name}" ]; then
+	# TODO Throw an error, if $2 contains illegal characters like double quotes
+    IFS='/' read -a folder_array <<< "${folder_name}"
+    api_folder_id=$(onedrive_get_or_create_folder "${folder_array[@]}")
+	exit_on_error
+
+    [ "${creat_folder}" == "1" ] && exit 0
+    export api_folder_id
+    debug "api_folder_id is now '${api_folder_id}'"
+fi
+
+if [ -z "$1" ]; then
+        echo "Please specify at least one file to upload"
+        exit 1
+fi
+
+function start_upload() {
+    source "${script_base_folder}/onedrive-base"
+
+    onedrive_upload_file "$1" "$2"
+}
+export -f start_upload
+
+if [ "${rename_mode}" == "0" ]; then
+    printf "%s\0" "${@}" | xargs -0 -n1 -P${max_upload_threads} bash -c 'start_upload "$1"' bash
+else
+    printf "%s\0" "${@}" | xargs -0 -n2 -P${max_upload_threads} bash -c 'start_upload "$1" "$2"' bash
+fi
+
